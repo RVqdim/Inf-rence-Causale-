@@ -1,0 +1,268 @@
+---
+title: "un_lien_causal"
+format: html
+editor: visual
+---
+
+```{r}
+library(dplyr)
+library(tibble)
+library(car)
+```
+
+## Idée / contexte
+
+L'idée de ce qmd et de trouver un moyen de mettre en évidence un lien causal entre un SNP et une métabolite ou un groupe de SNP et un groupe de métabolites
+
+voici les groupes dont on sait qu'il y a un lien causal
+
+Le groupe de SNP : Bn.A09.p2733282, Bn.A03.p6484137, Bn.C2.p51343986 et Bn.C7.p38504198 Et le groupe de métabolites : Progoitrin (G7), epiprogoitrin (G8), glucobrassicanapin (G11), et gluconapoleiferin (G12)
+
+Le groupe de SNP : Bn.A04.p2542000, Bn.C3.p1524306, Bn.C3.p3111862, Bn.C3.p6640991, et Bn.C4.p35007222 Et le groupe de métabolites : G30 : Pent i, G31 : 3mPen, G32 : Hex i1, G34 : Hept i1
+
+## Premiere tentative
+
+Première tentative: essayer de trouver un lien entre entre le premier groupe de SNP et le premier groupe de métabolite
+
+On va utiliser le principe de la régression linéaire mais on va l'étendre pour pouvoir voir l'effet d'un groupe avec un autre groupe. Onn va utiliser le MLM (Modèle linéaire multivarié)
+
+```{r}
+load("data_metabo_rep1.Rdata")
+load("data_microbio_rep1.Rdata")
+load("geno_numeric.Rdata")
+```
+
+### choix des groupes
+
+```{r}
+snp_cols <- c("Bn.A09.p2733282", "Bn.A03.p6484137", "Bn.C2.p51343986", "Bn.C7.p38504198")
+metabo_cols <- c("G7_Progoitrin_(nmol_g-1_DW)", "G8_Epiprogoitrin_(nmol_g-1_DW)", "G11_Glucobrassicanapin_(nmol_g-1_DW)", "G12_Gluconapoleiferin_(nmol_g-1_DW)")
+```
+
+premiere chose on vérifie que les snp demandés sont bien dans geno_numeric
+
+```{r}
+
+snp_presents <- intersect(snp_cols, rownames(geno_numeric))
+print("--- DIAGNOSTIC DES SNP ---")
+if(length(snp_presents) == 0) {
+  stop("ERREUR CRITIQUE : Aucun des 4 SNP n'est présent dans le fichier génotype !")
+} else {
+  print(paste("SNP trouvés et utilisés :", length(snp_presents), "sur", length(snp_cols)))
+  print(snp_presents)
+  
+  missing <- setdiff(snp_cols, snp_presents)
+  if(length(missing) > 0) print(paste("SNP manquants (exclus de l'analyse) :", paste(missing, collapse=", ")))
+}
+```
+
+```{r}
+geno_subset <- (geno_numeric[snp_presents, , drop=FALSE]) # On ne prend que les lignes existantes
+rownames(geno_subset) <- snp_presents # On s'assure que les noms de colonnes sont corrects
+```
+
+Pour utiliser notre modèle mlm on veut fusionner le jeu de données qui contient les SNP et celui qui contient les métabolites au format tibble
+
+```{r}
+#On met au format tibble geno
+geno_ready <- as_tibble(t(geno_subset), rownames = NA) %>%
+  rownames_to_column(var = "ID")
+
+#On met au format tibble metabo déja fait avant
+metabo_ready <- as_tibble(data_metabo_rep1, rownames = NA) %>%
+  rownames_to_column(var = "ID")
+
+#FUSION
+geno_metabo_final <- inner_join(geno_ready, metabo_ready, by = "ID")
+```
+
+On renomme les SNP car les caractères spéciaux "\_","-" compliquent notre affaire
+
+```{r}
+geno_metabo_clean <- geno_metabo_final %>%
+  rename(
+    G7 = `G7_Progoitrin_(nmol_g-1_DW)`,
+    G8 = `G8_Epiprogoitrin_(nmol_g-1_DW)`,
+    G11 = `G11_Glucobrassicanapin_(nmol_g-1_DW)`,
+    G12 = `G12_Gluconapoleiferin_(nmol_g-1_DW)`
+  )
+```
+
+### modèle
+
+```{r}
+
+
+formula_mlm <- as.formula(paste(
+    "cbind(G7, G8, G11, G12) ~ ", 
+    paste(snp_presents, collapse = " + ")
+))
+
+print( format(formula_mlm))
+
+mlm_model <- lm(formula_mlm, data = geno_metabo_clean)
+
+# 7. Résultats
+print("--- RÉSULTATS STATISTIQUES (Pillai) ---")
+print(Anova(mlm_model, multivariate=TRUE, test.statistic="Pillai"))
+```
+
+test de Pillai = le plus robuste
+
+On voit donc que chaque SNP entraine le groupe de métabolites comme prévu
+
+## 2 eme modele
+
+```{r}
+snp_cols2 <- c("Bn.A04.p2542000", "Bn.C3.p1524306", "Bn.C3.p3111862", "Bn.C3.p6640991","Bn.C4.p35007222")
+metabo_cols2 <- c("G30_Pentyl-GLS_isomer_(nmol_g-1_DW)", "G31_3-methylpentyl-GLS_(nmol_g-1_DW)", "G32_Hexyl-GLS_isomer_I_(nmol_g-1_DW)", "G34_Heptyl-GLS_isomer_I_(nmol_g-1_DW)")
+```
+
+```{r}
+
+snp_presents2 <- intersect(snp_cols2, rownames(geno_numeric))
+print("--- DIAGNOSTIC DES SNP ---")
+if(length(snp_presents2) == 0) {
+  stop("ERREUR CRITIQUE : Aucun des 5 SNP n'est présent dans le fichier génotype !")
+} else {
+  print(paste("SNP trouvés et utilisés :", length(snp_presents2), "sur", length(snp_cols2)))
+  print(snp_presents2)
+  
+  missing <- setdiff(snp_cols2, snp_presents2)
+  if(length(missing) > 0) print(paste("SNP manquants (exclus de l'analyse) :", paste(missing, collapse=", ")))
+}
+```
+
+```{r}
+geno_subset2 <- (geno_numeric[snp_presents2, , drop=FALSE]) # On ne prend que les lignes existantes
+rownames(geno_subset2) <- snp_presents2 # On s'assure que les noms de colonnes sont corrects
+
+```
+
+```{r}
+#On met au format tibble geno
+geno_ready2 <- as_tibble(t(geno_subset2), rownames = NA) %>%
+  rownames_to_column(var = "ID")
+
+#On met au format tibble metabo
+metabo_ready <- as_tibble(data_metabo_rep1, rownames = NA) %>%
+  rownames_to_column(var = "ID")
+
+#FUSION
+geno_metabo_final2 <- inner_join(geno_ready2, metabo_ready, by = "ID")
+```
+
+```{r}
+geno_metabo_clean2 <- geno_metabo_final2 %>%
+  rename(
+    G30 = `G30_Pentyl-GLS_isomer_(nmol_g-1_DW)`,
+    G31 = `G31_3-methylpentyl-GLS_(nmol_g-1_DW)`,
+    G32 = `G32_Hexyl-GLS_isomer_I_(nmol_g-1_DW)`,
+    G34 = `G34_Heptyl-GLS_isomer_I_(nmol_g-1_DW)`
+  )
+```
+
+```{r}
+formula_mlm2 <- as.formula(paste(
+    "cbind(G30, G31, G32, G34) ~ ", 
+    paste(snp_presents2, collapse = " + ")
+))
+
+print( format(formula_mlm2))
+
+mlm_model2 <- lm(formula_mlm2, data = geno_metabo_clean2)
+
+# 7. Résultats
+print("--- RÉSULTATS STATISTIQUES (Pillai) ---")
+print(Anova(mlm_model2, multivariate=TRUE, test.statistic="Pillai"))
+```
+
+## Matrice variance-covariance
+
+pour le genome NE PAS LANCER BEAUCOUP TROP LONG A RUN
+
+```{r}
+geno_mat <- as.matrix(geno_numeric)
+geno_cov <- cov(geno_mat)
+
+heatmap(geno_cov)
+```
+
+pour les metabos
+
+```{r}
+# Voir quelles colonnes ont une variance nulle
+metabo_clean <- na.omit(data_metabo_rep1)
+metabo_mat <- as.matrix(metabo_clean)
+variances <- apply(metabo_mat, 2, var, na.rm = TRUE)
+cols_zero_var <- names(variances[variances == 0 | is.na(variances)])
+
+cat("Colonnes à variance nulle ou NA:\n")
+print(cols_zero_var)
+
+# Retirer ces colonnes
+metabo_mat_clean <- metabo_mat[, variances > 0 & !is.na(variances)]
+noms_courts <- sub("_.*", "", colnames(metabo_cor))
+# Calculer et visualiser
+metabo_cor <- cor(metabo_mat_clean, use = "pairwise.complete.obs")
+heatmap(metabo_cor, 
+        labRow = noms_courts, 
+        labCol = noms_courts)
+heatmap(cov(metabo_mat_clean))
+```
+
+
+
+Pour le premier groupe ou il y a causalité entre les SNP et les métabos
+
+```{r}
+
+geno_ready_mat <- geno_ready %>% 
+  select(where(is.numeric)) %>% 
+  na.omit() %>%
+  as.matrix()
+cov(geno_ready_mat)
+
+heatmap(cov(geno_ready_mat), main = " var covar snp groupe 1")
+heatmap(cor(geno_ready_mat), main = "cor snp groupe 1")
+
+metabo_ready_mat <- metabo_ready %>% 
+  select("G7_Progoitrin_(nmol_g-1_DW)", "G8_Epiprogoitrin_(nmol_g-1_DW)", "G11_Glucobrassicanapin_(nmol_g-1_DW)", "G12_Gluconapoleiferin_(nmol_g-1_DW)")  
+  
+lab <- substr(colnames(metabo_ready_mat), 1, 3)
+
+heatmap(cov(metabo_ready_mat), labRow = lab, labCol = lab,main = " var covar metabo groupe 1")
+
+heatmap(cor(metabo_ready_mat), labRow = lab, labCol = lab,main = " cor metabo groupe 1")
+
+```
+
+*Interprétation* de la matrice de variance covariance du premier groupe de SNP causaux:
+
+```{r}
+par(oma = c(6, 1, 1, 6),
+    cex = 1.2,
+    cex.main = 1.2,
+    cex.lab = 0.5)
+
+geno_ready_mat2 <- geno_ready2 %>% 
+  select(where(is.numeric)) %>% 
+  na.omit() %>%
+  as.matrix()
+cov(geno_ready_mat2)
+
+heatmap(cov(geno_ready_mat2), main = "var-covar snp groupe 2")
+heatmap(cor(geno_ready_mat2), main = "cor snp groupe 2")
+
+
+metabo_ready_mat2 <- metabo_ready %>% 
+  select("G30_Pentyl-GLS_isomer_(nmol_g-1_DW)",
+    "G31_3-methylpentyl-GLS_(nmol_g-1_DW)",
+    "G32_Hexyl-GLS_isomer_I_(nmol_g-1_DW)",
+    "G34_Heptyl-GLS_isomer_I_(nmol_g-1_DW)")  
+lab_g2 <- substr(colnames(metabo_ready_mat2),1,3)  
+
+heatmap(cov(metabo_ready_mat2),labRow = lab_g2, labCol = lab_g2,main = "var-covar metabo groupe 2")
+
+heatmap(cor(metabo_ready_mat2),labRow = lab_g2, labCol = lab_g2, main = "cor metabo groupe 2")
+```
