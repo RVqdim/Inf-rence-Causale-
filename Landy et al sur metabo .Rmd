@@ -1,0 +1,603 @@
+---
+title: "Landy application"
+author: "Vadim Lefèvre"
+date: "`r Sys.Date()`"
+output: html_document
+---
+###Application aux données du colza :
+```{r}
+load('~/Desktop/Inférence causale/Data/data_metabo_rep1.Rdata')
+load('~/Desktop/Inférence causale/Data/data_microbio_rep1.Rdata')
+load('~/Desktop/Inférence causale/Data/geno_numeric.Rdata')
+
+summary(data_metabo_rep1)
+## 1. Charger et mettre en forme les données métabolomiques
+# On part de data_metabo_rep1 (individus en lignes, métabolites en colonnes)
+
+Y_metabo <- as.matrix(t(data_metabo_rep1))  # D x N (D = métabolites, N = individus)
+geno_numeric_mat <- as.matrix(t(geno_numeric))  # SNP : N x P, comme pour microbiome
+
+# Vérifier dimensions
+dim(Y_metabo)          # D_metabo x N
+dim(geno_numeric_mat)  # N x P_snp
+
+## 2. Définir le SNP de traitement (comme avant)
+snp_index <- 1072  # par exemple, même SNP que pour le microbiome
+geno_snp <- geno_numeric_mat[, snp_index]  # vecteur de longueur N
+
+# Traitement binaire : ici, on considère les homozygotes ALT (2) comme "traités"
+Tr_SNP <- (geno_snp == 2)
+
+## 3. Filtrer les individus avec génotype valide
+idx_valid_snp <- !is.na(Tr_SNP)
+
+# 4. Filtrer aussi les individus avec métabolites complets (au moins 1 métabo non-NA)
+# Si tu veux être strict : aucun NA sur les métabolites
+prop_non_NA <- colMeans(!is.na(Y_metabo))
+idx_valid_metabo <- prop_non_NA >= 0.72
+# 5. Indices d'individus valides pour les deux jeux (SNP et métabo)
+idx_valid_both <- idx_valid_snp & idx_valid_metabo
+
+# 6. Restreindre Y_metabo et Tr_SNP aux individus valides
+Y_metabo_clean <- Y_metabo[, idx_valid_both, drop = FALSE]
+Tr_SNP_clean   <- Tr_SNP[idx_valid_both]
+
+## 7. Vérifications
+dim(Y_metabo_clean)    # D_metabo x N_effectif
+length(Tr_SNP_clean)   # doit être = N_effectif
+table(Tr_SNP_clean)    # nombre de TRUE/FALSE (traités vs non-traités)
+sum(is.na(Tr_SNP_clean))  # doit être 0
+
+## 8. (Optionnel) Résumé des NA métabolites avant/ après filtrage
+cat("Nombre de métabolites :", nrow(Y_metabo), "\n")
+cat("Nombre d'individus avant filtrage :", ncol(Y_metabo), "\n")
+cat("Nombre d'individus après filtrage :", ncol(Y_metabo_clean), "\n")
+```
+
+```{r}
+snp_index <- 16
+geno_numeric_mat <- as.matrix(t(geno_numeric))
+geno_snp  <- geno_numeric_mat[, snp_index]
+Tr_SNP    <- (geno_snp == 2)
+
+idx_valid_snp <- !is.na(Tr_SNP)
+
+Y_metabo <- as.matrix(t(data_metabo_rep1))  # 79 x 242
+Y_metabo_snp <- Y_metabo[, idx_valid_snp, drop = FALSE]
+Tr_SNP_snp   <- Tr_SNP[idx_valid_snp]
+
+## 2. Filtrer les métabolites ET individus avec NA (version sans NA obligatoire)
+
+# a) Supprimer les métabolites (lignes) avec trop de NA
+#    (ici : on enlève les lignes avec > 20% de NA)
+prop_non_NA_rows <- rowMeans(!is.na(Y_metabo_snp))
+row_keep <- prop_non_NA_rows >= 0.8   # seuil à adapter
+
+Y_metabo_rowclean <- Y_metabo_snp[row_keep, , drop = FALSE]
+
+# b) Supprimer les individus (colonnes) qui ont au moins un NA résiduel
+col_keep <- colSums(is.na(Y_metabo_rowclean)) == 0
+
+Y_metabo_clean <- Y_metabo_rowclean[, col_keep, drop = FALSE]
+Tr_SNP_clean   <- Tr_SNP_snp[col_keep]
+
+## 3. Vérifications strictes
+cat("Dimensions finales M :", dim(Y_metabo_clean), "\n")
+cat("Longueur Tr :", length(Tr_SNP_clean), "\n")
+cat("NA dans M :", sum(is.na(Y_metabo_clean)), "\n")
+cat("NA dans Tr :", sum(is.na(Tr_SNP_clean)), "\n")
+table(Tr_SNP_clean)
+
+# DOIVENT être 0 :
+stopifnot(sum(is.na(Y_metabo_clean)) == 0)
+stopifnot(sum(is.na(Tr_SNP_clean)) == 0)
+
+res_metabo_IS <- impute_and_stabilize(
+  M = Y_metabo_clean, 
+  Tr = Tr_SNP_clean, 
+  rank = 3,
+  nrun = 10,
+  method = "brunet"
+)
+res_metabo_IS$ATE
+```
+
+```{r}
+#On veut maintenant boucler l'algorithme Impute and Stabilize sur n SNP en utilisatn k variables latentes issues de la NMF, le k variables latentes est déterminée par méthode du coude en détaillant les résultats de la NMF
+#Boucle pour IS sur N SNP à ssampler sur K variables latentes
+library(NMF)
+library(causalLFO)
+
+# 1. PARAMÈTRES
+N_SNPS_TO_SAMPLE <- 10  # Nombre de SNP à échantillonner
+K_RANK <- 3             # Rang pour NMF
+
+# Préparation matrice SNP
+geno_numeric_mat <- as.matrix(t(geno_numeric))  # N x P
+all_snp_indices <- 1:ncol(geno_numeric_mat)
+
+# Matrice métabolites brute (D x N)
+Y_metabo <- as.matrix(t(data_metabo_rep1))
+
+
+# 2. ÉCHANTILLONNAGE DES SNP
+set.seed(123)  # Pour reproductibilité
+sampled_indices <- sample(all_snp_indices, N_SNPS_TO_SAMPLE)
+
+
+# 3. BOUCLE SUR CHAQUE SNP ÉCHANTILLONNÉ
+
+# Initialisation matrice résultats (N_SNP x (1 + K_RANK))
+# Colonne 1 = SNP_Index, Colonnes suivantes = ATE_Factor_1, ATE_Factor_2, ...
+results_matrix <- matrix(NA, nrow = N_SNPS_TO_SAMPLE, ncol = 1 + K_RANK)
+colnames(results_matrix) <- c("SNP_ID", paste0("ATE_Factor_", 1:K_RANK))
+
+cat("Démarrage de l'analyse sur", N_SNPS_TO_SAMPLE, "SNP...\n")
+
+for (i in seq_along(sampled_indices)) {
+  
+  snp_idx <- sampled_indices[i]
+  snp_name <- colnames(geno_numeric_mat)[snp_idx] # Ou snp_idx si pas de nom
+  if (is.null(snp_name)) snp_name <- snp_idx
+  
+  cat(sprintf("\n--- Traitement SNP %d/%d (Index: %s) ---\n", i, N_SNPS_TO_SAMPLE, snp_name))
+  
+  # A. Extraction SNP et Traitement
+  geno_snp <- geno_numeric_mat[, snp_idx]
+  Tr_SNP   <- (geno_snp == 2)
+  
+  # Filtrer individus avec SNP valide
+  idx_valid_snp <- !is.na(Tr_SNP)
+  
+  if (sum(idx_valid_snp) < 10) {
+    cat("Trop peu d'individus avec génotype valide. Ignoré.\n")
+    results_matrix[i, 1] <- snp_idx # On garde l'ID mais ATE reste NA
+    next
+  }
+  
+  # B. Alignement métabolites
+  Y_metabo_snp <- Y_metabo[, idx_valid_snp, drop = FALSE]
+  Tr_SNP_snp   <- Tr_SNP[idx_valid_snp]
+  
+  # C. Filtrage NA (Métabolites & Individus)
+  #    Note: On ré-applique le filtrage pour chaque SNP car les individus
+  #    valides pour le SNP changent, donc la matrice clean change.
+  
+  # C.1. Lignes (métabolites) avec trop de NA
+  prop_non_NA_rows <- rowMeans(!is.na(Y_metabo_snp))
+  row_keep <- prop_non_NA_rows >= 0.8
+  
+  if (sum(row_keep) < K_RANK) {
+     cat("Pas assez de métabolites valides après filtrage. Ignoré.\n")
+     results_matrix[i, 1] <- snp_idx
+     next
+  }
+  Y_metabo_rowclean <- Y_metabo_snp[row_keep, , drop = FALSE]
+  
+  # C.2. Colonnes (individus) sans AUCUN NA résiduel
+  col_keep <- colSums(is.na(Y_metabo_rowclean)) == 0
+  
+  if (sum(col_keep) < 10) {
+     cat("Pas assez d'individus complets (métabo). Ignoré.\n")
+     results_matrix[i, 1] <- snp_idx
+     next
+  }
+  
+  Y_metabo_clean <- Y_metabo_rowclean[, col_keep, drop = FALSE]
+  Tr_SNP_clean   <- Tr_SNP_snp[col_keep]
+  
+  # Vérification équilibre traitement (au moins 2 traités et 2 contrôles)
+  n_treated <- sum(Tr_SNP_clean)
+  n_control <- sum(!Tr_SNP_clean)
+  
+  if (n_treated < 2 | n_control < 2) {
+    cat("Déséquilibre traitement trop fort (Tr:", n_treated, "/ Ctrl:", n_control, "). Ignoré.\n")
+    results_matrix[i, 1] <- snp_idx
+    next
+  }
+  
+  # D. Impute & Stabilize
+  tryCatch({
+    res_IS <- impute_and_stabilize(
+      M = Y_metabo_clean, 
+      Tr = Tr_SNP_clean, 
+      rank = K_RANK,
+      nrun = 10,  # Réduire si trop long
+      method = "brunet"
+    )
+    
+    # E. Stockage
+    # L'objet retourné contient 'psi_L' qui est l'ATE
+    ate_vec <- res_IS$ATE 
+    
+    results_matrix[i, 1] <- snp_idx
+    results_matrix[i, 2:(1 + K_RANK)] <- ate_vec
+    
+    cat("Succès. ATE:", paste(round(ate_vec, 2), collapse=" / "), "\n")
+    
+  }, error = function(e) {
+    cat("Erreur NMF/Algo:", e$message, "\n")
+    results_matrix[i, 1] <- snp_idx
+  })
+}
+
+# ------------------------------------------------------------------------------
+# 4. RÉSULTATS
+# ------------------------------------------------------------------------------
+cat("\nAnalyse terminée.\n")
+print(head(results_matrix))
+
+# Convertir en data frame pour faciliter la lecture
+df_results_IS <- as.data.frame(results_matrix)
+df_results_IS <- df_results[!is.na(df_results$ATE_Factor_1), ] # Garder succès uniquement
+
+```
+```{r}
+#On veut faire pareil pour l'algorithme de all_data pour comparer avec IS (pas obligé juste on suit la méthodo de Landy et al.)
+#Boucle pour all_data
+# 1. PARAMÈTRES
+N_SNPS_TO_SAMPLE <- 10  # Nombre de SNP à échantillonner
+K_RANK <- 3             # Rang pour NMF
+
+# Préparation matrice SNP
+geno_numeric_mat <- as.matrix(t(geno_numeric))  # N x P
+all_snp_indices <- 1:ncol(geno_numeric_mat)
+
+# Matrice métabolites brute (D x N)
+Y_metabo <- as.matrix(t(data_metabo_rep1))
+
+
+# 2. ÉCHANTILLONNAGE DES SNP
+set.seed(123)  # Pour reproductibilité
+sampled_indices <- sample(all_snp_indices, N_SNPS_TO_SAMPLE)
+
+
+# 3. BOUCLE SUR CHAQUE SNP ÉCHANTILLONNÉ
+
+# Initialisation matrice résultats (N_SNP x (1 + K_RANK))
+# Colonne 1 = SNP_Index, Colonnes suivantes = ATE_Factor_1, ATE_Factor_2, ...
+results_matrix <- matrix(NA, nrow = N_SNPS_TO_SAMPLE, ncol = 1 + K_RANK)
+colnames(results_matrix) <- c("SNP_ID", paste0("ATE_Factor_", 1:K_RANK))
+
+cat("Démarrage de l'analyse sur", N_SNPS_TO_SAMPLE, "SNP...\n")
+
+for (i in seq_along(sampled_indices)) {
+  
+  snp_idx <- sampled_indices[i]
+  snp_name <- colnames(geno_numeric_mat)[snp_idx] # Ou snp_idx si pas de nom
+  if (is.null(snp_name)) snp_name <- snp_idx
+  
+  cat(sprintf("\n--- Traitement SNP %d/%d (Index: %s) ---\n", i, N_SNPS_TO_SAMPLE, snp_name))
+  
+  # A. Extraction SNP et Traitement
+  geno_snp <- geno_numeric_mat[, snp_idx]
+  Tr_SNP   <- (geno_snp == 2)
+  
+  # Filtrer individus avec SNP valide
+  idx_valid_snp <- !is.na(Tr_SNP)
+  
+  if (sum(idx_valid_snp) < 10) {
+    cat("Trop peu d'individus avec génotype valide. Ignoré.\n")
+    results_matrix[i, 1] <- snp_idx # On garde l'ID mais ATE reste NA
+    next
+  }
+  
+  # B. Alignement métabolites
+  Y_metabo_snp <- Y_metabo[, idx_valid_snp, drop = FALSE]
+  Tr_SNP_snp   <- Tr_SNP[idx_valid_snp]
+  
+  # C. Filtrage NA (Métabolites & Individus)
+  #    Note: On ré-applique le filtrage pour chaque SNP car les individus
+  #    valides pour le SNP changent, donc la matrice clean change.
+  
+  # C.1. Lignes (métabolites) avec trop de NA
+  prop_non_NA_rows <- rowMeans(!is.na(Y_metabo_snp))
+  row_keep <- prop_non_NA_rows >= 0.8
+  
+  if (sum(row_keep) < K_RANK) {
+     cat("Pas assez de métabolites valides après filtrage. Ignoré.\n")
+     results_matrix[i, 1] <- snp_idx
+     next
+  }
+  Y_metabo_rowclean <- Y_metabo_snp[row_keep, , drop = FALSE]
+  
+  # C.2. Colonnes (individus) sans AUCUN NA résiduel
+  col_keep <- colSums(is.na(Y_metabo_rowclean)) == 0
+  
+  if (sum(col_keep) < 10) {
+     cat("Pas assez d'individus complets (métabo). Ignoré.\n")
+     results_matrix[i, 1] <- snp_idx
+     next
+  }
+  
+  Y_metabo_clean <- Y_metabo_rowclean[, col_keep, drop = FALSE]
+  Tr_SNP_clean   <- Tr_SNP_snp[col_keep]
+  
+  # Vérification équilibre traitement (au moins 2 traités et 2 contrôles)
+  n_treated <- sum(Tr_SNP_clean)
+  n_control <- sum(!Tr_SNP_clean)
+  
+  if (n_treated < 2 | n_control < 2) {
+    cat("Déséquilibre traitement trop fort (Tr:", n_treated, "/ Ctrl:", n_control, "). Ignoré.\n")
+    results_matrix[i, 1] <- snp_idx
+    next
+  }
+  
+  # D. Impute & Stabilize
+  tryCatch({
+    res_all_data <- all_data(
+      M = Y_metabo_clean, 
+      Tr = Tr_SNP_clean, 
+      rank = K_RANK,
+      nrun = 10,  # Réduire si trop long
+      method = "brunet"
+    )
+    
+    # E. Stockage
+    # L'objet retourné contient 'psi_L' qui est l'ATE
+    ate_vec <- res_all_data$ATE 
+    
+    results_matrix[i, 1] <- snp_idx
+    results_matrix[i, 2:(1 + K_RANK)] <- ate_vec
+    
+    cat("Succès. ATE:", paste(round(ate_vec, 2), collapse=" / "), "\n")
+    
+  }, error = function(e) {
+    cat("Erreur NMF/Algo:", e$message, "\n")
+    results_matrix[i, 1] <- snp_idx
+  })
+}
+
+# ------------------------------------------------------------------------------
+# 4. RÉSULTATS
+# ------------------------------------------------------------------------------
+cat("\nAnalyse terminée.\n")
+print(head(results_matrix))
+
+# Convertir en data frame pour faciliter la lecture
+df_results_all_data <- as.data.frame(results_matrix)
+df_results_all_data <- df_results[!is.na(df_results$ATE_Factor_1), ] # Garder succès uniquement
+
+```
+
+```{r}
+#Maintenant on cuisine une boucle qui nous permettra de déterminer l'ATE sur un nombre de SNP : N_SNPS_TO_SAMPLE pour pouvoir les comparer, ils sont choisis aléatoirement dans le jeu de données, on va donc créer une fonction qui fait tourner IS sur un nb de SNP qu'on donne, charger ?IS_sample pour les détails de la fonction.
+library(NMF)
+library(causalLFO)
+
+# ==============================================================================
+# FONCTION 1 : IS_sample (Impute and Stabilize)
+# ==============================================================================
+IS_sample <- function(Tr_matrix, M_matrix, N_SNPS_TO_SAMPLE, K_RANK, nruns) {
+  
+  # Validation inputs
+  if (nrow(Tr_matrix) != ncol(M_matrix)) {
+    warning("Attention: Nombre d'individus dans Tr et M semble discordant. Vérifiez les dimensions.")
+  }
+  
+  # Préparation des indices SNP
+  all_snp_indices <- 1:ncol(Tr_matrix)
+  
+  # Échantillonnage
+  set.seed(123) 
+  sampled_indices <- sample(all_snp_indices, min(N_SNPS_TO_SAMPLE, length(all_snp_indices)))
+  
+  # Initialisation matrice résultats
+  results_matrix <- matrix(NA, nrow = length(sampled_indices), ncol = 1 + K_RANK)
+  colnames(results_matrix) <- c("SNP_ID", paste0("ATE_Factor_", 1:K_RANK))
+  
+  cat("\n[IS_sample] Démarrage de l'analyse Impute & Stabilize sur", length(sampled_indices), "SNP...\n")
+  
+  for (i in seq_along(sampled_indices)) {
+    
+    snp_idx <- sampled_indices[i]
+    snp_name <- colnames(Tr_matrix)[snp_idx]
+    if (is.null(snp_name)) snp_name <- snp_idx
+    
+    cat(sprintf("\n--- [IS] SNP %d/%d (Index: %s) ---\n", i, length(sampled_indices), snp_name))
+    
+    # A. Extraction SNP et Traitement
+    geno_snp <- Tr_matrix[, snp_idx]
+    Tr_SNP   <- (geno_snp == 2)
+    
+    idx_valid_snp <- !is.na(Tr_SNP)
+    
+    if (sum(idx_valid_snp) < 10) {
+      cat("Trop peu d'individus avec génotype valide. Ignoré.\n")
+      results_matrix[i, 1] <- snp_idx 
+      next
+    }
+    
+    # B. Alignement métabolites
+    Y_metabo_snp <- M_matrix[, idx_valid_snp, drop = FALSE]
+    Tr_SNP_snp   <- Tr_SNP[idx_valid_snp]
+    
+    # C. Filtrage NA
+    prop_non_NA_rows <- rowMeans(!is.na(Y_metabo_snp))
+    row_keep <- prop_non_NA_rows >= 0.8
+    
+    if (sum(row_keep) < K_RANK) {
+      cat("Pas assez de métabolites valides. Ignoré.\n")
+      results_matrix[i, 1] <- snp_idx
+      next
+    }
+    Y_metabo_rowclean <- Y_metabo_snp[row_keep, , drop = FALSE]
+    
+    col_keep <- colSums(is.na(Y_metabo_rowclean)) == 0
+    
+    if (sum(col_keep) < 10) {
+      cat("Pas assez d'individus complets. Ignoré.\n")
+      results_matrix[i, 1] <- snp_idx
+      next
+    }
+    
+    Y_metabo_clean <- Y_metabo_rowclean[, col_keep, drop = FALSE]
+    Tr_SNP_clean   <- Tr_SNP_snp[col_keep]
+    
+    # Vérification équilibre
+    n_treated <- sum(Tr_SNP_clean)
+    n_control <- sum(!Tr_SNP_clean)
+    
+    if (n_treated < 2 | n_control < 2) {
+      cat("Déséquilibre traitement trop fort. Ignoré.\n")
+      results_matrix[i, 1] <- snp_idx
+      next
+    }
+    
+    # D. Algorithme Impute & Stabilize
+    tryCatch({
+      res_IS <- impute_and_stabilize(
+        M = Y_metabo_clean, 
+        Tr = Tr_SNP_clean, 
+        rank = K_RANK,
+        nrun = nruns,
+        method = "brunet"
+      )
+      
+      # E. Stockage sécurisé
+      ate_vec <- res_IS$psi_L  # Attention: souvent 'psi_L', parfois 'ATE' selon version
+      if(is.null(ate_vec)) ate_vec <- res_IS$ATE
+      
+      if (!is.null(ate_vec) && length(ate_vec) == K_RANK) {
+        results_matrix[i, 1] <- snp_idx
+        results_matrix[i, 2:(1 + K_RANK)] <- ate_vec
+        cat("Succès. ATE:", paste(round(ate_vec, 2), collapse=" / "), "\n")
+      } else {
+        cat("Erreur dimension ATE.\n")
+        results_matrix[i, 1] <- snp_idx
+      }
+      
+    }, error = function(e) {
+      cat("Erreur Algo:", e$message, "\n")
+      results_matrix[i, 1] <- snp_idx
+    })
+  }
+  
+  # Nettoyage et retour
+  df_results <- as.data.frame(results_matrix)
+  df_results <- df_results[!is.na(df_results[,2]), ] # Garder succès uniquement
+  return(df_results)
+}
+
+
+# ==============================================================================
+# FONCTION 2 : alldata_sample (All Data)
+# ==============================================================================
+alldata_sample <- function(Tr_matrix, M_matrix, N_SNPS_TO_SAMPLE, K_RANK, nruns) {
+  
+  # Validation inputs
+  if (nrow(Tr_matrix) != ncol(M_matrix)) {
+    warning("Attention: Nombre d'individus dans Tr et M semble discordant.")
+  }
+  
+  all_snp_indices <- 1:ncol(Tr_matrix)
+  set.seed(123) 
+  sampled_indices <- sample(all_snp_indices, min(N_SNPS_TO_SAMPLE, length(all_snp_indices)))
+  
+  results_matrix <- matrix(NA, nrow = length(sampled_indices), ncol = 1 + K_RANK)
+  colnames(results_matrix) <- c("SNP_ID", paste0("ATE_Factor_", 1:K_RANK))
+  
+  cat("\n[alldata_sample] Démarrage de l'analyse All Data sur", length(sampled_indices), "SNP...\n")
+  
+  for (i in seq_along(sampled_indices)) {
+    
+    snp_idx <- sampled_indices[i]
+    snp_name <- colnames(Tr_matrix)[snp_idx]
+    if (is.null(snp_name)) snp_name <- snp_idx
+    
+    cat(sprintf("\n--- [AllData] SNP %d/%d (Index: %s) ---\n", i, length(sampled_indices), snp_name))
+    
+    # A. Extraction SNP et Traitement
+    geno_snp <- Tr_matrix[, snp_idx]
+    Tr_SNP   <- (geno_snp == 2)
+    
+    idx_valid_snp <- !is.na(Tr_SNP)
+    
+    if (sum(idx_valid_snp) < 10) {
+      cat("Trop peu d'individus. Ignoré.\n")
+      results_matrix[i, 1] <- snp_idx 
+      next
+    }
+    
+    # B. Alignement métabolites
+    Y_metabo_snp <- M_matrix[, idx_valid_snp, drop = FALSE]
+    Tr_SNP_snp   <- Tr_SNP[idx_valid_snp]
+    
+    # C. Filtrage NA
+    prop_non_NA_rows <- rowMeans(!is.na(Y_metabo_snp))
+    row_keep <- prop_non_NA_rows >= 0.8
+    
+    if (sum(row_keep) < K_RANK) {
+      cat("Pas assez de métabolites valides. Ignoré.\n")
+      results_matrix[i, 1] <- snp_idx
+      next
+    }
+    Y_metabo_rowclean <- Y_metabo_snp[row_keep, , drop = FALSE]
+    
+    col_keep <- colSums(is.na(Y_metabo_rowclean)) == 0
+    
+    if (sum(col_keep) < 10) {
+      cat("Pas assez d'individus complets. Ignoré.\n")
+      results_matrix[i, 1] <- snp_idx
+      next
+    }
+    
+    Y_metabo_clean <- Y_metabo_rowclean[, col_keep, drop = FALSE]
+    Tr_SNP_clean   <- Tr_SNP_snp[col_keep]
+    
+    n_treated <- sum(Tr_SNP_clean)
+    n_control <- sum(!Tr_SNP_clean)
+    
+    if (n_treated < 2 | n_control < 2) {
+      cat("Déséquilibre traitement. Ignoré.\n")
+      results_matrix[i, 1] <- snp_idx
+      next
+    }
+    
+    # D. Algorithme All Data
+    tryCatch({
+      # Note: all_data n'a pas forcément besoin de 'nrun' selon la version,
+      # mais on le laisse pour cohérence si supporté.
+      res_all_data <- all_data(
+        M = Y_metabo_clean, 
+        Tr = Tr_SNP_clean, 
+        rank = K_RANK,
+        nrun = nruns, 
+        method = "brunet"
+      )
+      
+      # E. Stockage sécurisé
+      ate_vec <- res_all_data$psi_L # Vérifier si c'est psi_L ou ATE
+      if(is.null(ate_vec)) ate_vec <- res_all_data$ATE
+      
+      if (!is.null(ate_vec) && length(ate_vec) == K_RANK) {
+        results_matrix[i, 1] <- snp_idx
+        results_matrix[i, 2:(1 + K_RANK)] <- ate_vec
+        cat("Succès. ATE:", paste(round(ate_vec, 2), collapse=" / "), "\n")
+      } else {
+        cat("Erreur dimension ATE.\n")
+        results_matrix[i, 1] <- snp_idx
+      }
+      
+    }, error = function(e) {
+      cat("Erreur Algo:", e$message, "\n")
+      results_matrix[i, 1] <- snp_idx
+    })
+  }
+  
+  df_results <- as.data.frame(results_matrix)
+  df_results <- df_results[!is.na(df_results[,2]), ] 
+  return(df_results)
+}
+```
+
+NE PAS FAIRE TOURNER LA LIGNE SUIVANTE, UNIQUEMENT POUR ILLUSTRER SON UTILISATION
+```{r}
+#ex : on fait tourner notre boucle sur l'entièreté du JDD (24h minimum car on utilise les 28000 SNPs)
+dfinal<-IS_sample(Tr_matrix = geno_numeric_mat, M_matrix = Y_metabo, N_SNPS_TO_SAMPLE = 28017, K_RANK = 3, nruns = 10)
+
+```
+
+
+
+
