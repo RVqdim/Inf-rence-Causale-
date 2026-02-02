@@ -1,0 +1,265 @@
+---
+title: "Application de landy et al"
+format: html
+editor: visual
+output:
+  prettydoc::html_pretty:
+    theme: hpstr
+    highlight: github
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    highlight: tango
+---
+
+```{r}
+library(NMF)
+library(causalLFO)
+library(MASS)
+library(FactoMineR)
+```
+
+L'idée de ce qmd est de voir si on peut utiliser les méthodes présenter dans landy et al pour faire de l'inférence causale avec traitement multivarié sur nos données. Ici on va latentiser nos données snp et nmf et les mettre dans des modèles de régression linéaire multiples où les variables réponses sont des métabos et les variables explicatives des SNP.
+
+## Chargement et prétaitement des données
+
+```{r}
+load("geno_numeric.Rdata")
+load("data_metabo_rep1.Rdata")
+# On met les données de geno_numeric au format individus en lignes et variable en colonnes
+tgeno_numeric <- t(geno_numeric)
+
+```
+
+**Traitement des données manquantes**
+
+```{r}
+cat("dimension du jeu de données SNP original", dim(geno_numeric), "\n")
+snp_clean <- na.omit(geno_numeric)
+cat("dimension du jeu de données SNP après traitement des NA", dim(snp_clean), "\n")
+```
+
+```{r}
+cat("dimension du jeu de données métabo original", dim(data_metabo_rep1), "\n")
+metabo_clean <- na.omit(data_metabo_rep1)
+cat("dimension du jeu de données métabo après traitement des NA", dim(metabo_clean), "\n")
+```
+
+**Pour le reste du traitement on ne garde uniquement les individus qui sont présent dans les deux jeu de données**
+
+```{r}
+# Identifiants dans les données génomiques (242 individus)
+tsnp_clean <- t(snp_clean)
+id_geno <- rownames(tsnp_clean) 
+
+# Identifiants dans les données de microbiome (69 individus)
+id_metabo <- rownames(metabo_clean)
+
+
+# Liste des identifiants d'échantillons communs (ceux que vous garderez)
+id_commun <- intersect(id_geno, id_metabo)
+
+
+# On garde donc que les individus communs
+snp_aligned <- tsnp_clean[id_commun, ]
+metabo_aligned <- metabo_clean[id_commun, ]
+
+```
+
+```{r}
+X_snp_aligned <- as.matrix(snp_aligned)
+Y_metabo_aligned <- as.matrix(metabo_aligned)
+
+res_pca_snp <- PCA(X_snp_aligned , graph = FALSE)
+library(factoextra)
+fviz_eig(res_pca_snp, addlabels = TRUE, ylim = c(0, 50), 
+         main = "Scree Plot - Variance expliquée par les PCs des SNPs")
+
+
+```
+
+On choisit 3 composantes pour nos covariables d'ajustement
+
+```{r}
+k_pcs <- 3
+W_conf <- res_pca_snp$ind$coord[, 1:k_pcs]
+colnames(W_conf) <- paste0("PC", 1:k_pcs)
+```
+
+**Parmi les SNP on va garder ce qui ont une variance non-nulle**
+
+Les SNP avec une variance non nulles ne nous permettront pas grand chose pour l'annalyse et prennent trop de place. Je ne peux pas run de nmf sur un jeu de données 69 x 13 000.
+
+```{r}
+# A FAIRE FIXER UN SEUIL QUI A DU SENS STATISTIQUEMENT, POSER QUESTION PROF
+# Calculer la variance de chaque SNP
+snp_vars <- apply(X_snp_aligned, 2, var)
+
+# 2. Ne garder que les SNPs qui varient (et potentiellement ceux qui varient le plus)
+# On enlève ceux avec variance = 0
+X_snp_filtered <- X_snp_aligned[, snp_vars > 1]
+
+#OU GARDER QUE LES 1000 LES PLUS VARIABLES 
+
+cat("Dimensions avant filtre :", dim(X_snp_aligned), "\n")
+cat("Dimensions après filtre :", dim(X_snp_filtered), "\n")
+```
+
+## Apprendre les facteur latents
+
+On choisit le rang des facteur latents
+
+```{r}
+#plage
+rangs_a_tester <- 2:10
+cat("Estimation du rang en cours... patience...\n")
+res_estimation <- nmfEstimateRank(X_snp_filtered, 
+                                  range = rangs_a_tester, 
+                                  method = "brunet", 
+                                  nrun = 10,
+                                  seed = 123)
+
+# Afficher les graphiques
+plot(res_estimation)
+```
+
+Je ne vois aucun coude sur le rss par contre je vois une grosse chute chez cophrénétic je choisis donc k = 4
+
+```{r}
+res_nmf_snp <- nmf(X_snp_filtered, rank = 4, method = "brunet")
+
+
+# La matrice des scores (Basis) devient notre traitement multivarié A
+A_treatment <- basis(res_nmf_snp)
+colnames(A_treatment) <- paste0("SNP_Factor_", 1:ncol(A_treatment))
+```
+
+## Inférence Causale
+
+```{r}
+# Copie au cas où
+Y_clean <- Y_metabo_aligned
+
+# Gestion des NA
+
+if(any(is.na(Y_clean))) {
+  
+  # On remplace les valeurs manquantes par une valeur toute petite (bruit de fond)
+  Y_clean[is.na(Y_clean)] <- 1e-9 
+}
+
+# Gestion des lignes/colonnes vides (Somme = 0)
+# Brunet plante (division par zéro) si une ligne/colonne est vide.
+# On ne garde que les métabolites et échantillons qui ont du signal.
+ind_row <- rowSums(Y_clean) > 1e-10 
+ind_col <- colSums(Y_clean) > 1e-10
+Y_clean <- Y_clean[ind_row, ind_col]
+
+cat("Dimensions après nettoyage :", dim(Y_clean), "\n")
+
+#Gestion des négatifs 
+v_min <- min(Y_clean)
+if(v_min < 0) {
+  cat("Décalage des valeurs négatives...\n")
+  # On décale tout pour que le min soit à un petit epsilon positif
+  Y_clean <- Y_clean - v_min + 1e-9
+} else if (v_min == 0) {
+    # NMF n'aime pas les 0 exacts pour la méthode Brunet (KL divergence)
+    Y_clean <- Y_clean + 1e-9
+}
+
+# Vérification finale (Doit être égale à TRUE)
+all(Y_clean > 0) && !any(is.na(Y_clean))
+```
+
+On choisit le nb de facteur latent pour métabo
+
+```{r}
+#plage
+rangs_a_tester <- 2:10
+
+if(min(Y_metabo_aligned) < 0) Y_metabo_aligned <- Y_metabo_aligned - min(Y_metabo_aligned) + 1e-2
+cat("Estimation du rang en cours... patience...\n")
+res_estimation_m <- nmfEstimateRank(Y_clean, 
+                                  range = rangs_a_tester, 
+                                  method = "brunet", 
+                                  nrun = 10,
+                                  seed = 123)
+
+# Afficher les graphiques
+plot(res_estimation_m)
+```
+
+On choisit 3 car coude
+
+```{r}
+
+
+# ---Trouver les facteurs Métaboliques Latents (Outcome) ---
+
+
+
+res_nmf_metabo <- NMF::nmf(Y_clean, rank = 3, method = "brunet", seed = 123)
+
+# On récupère les scores des patients sur ces 3 voies métaboliques
+# Dimensions : (Individus x 3 facteurs)
+Y_latent_scores <- basis(res_nmf_metabo)
+colnames(Y_latent_scores) <- paste0("Metabo_Pattern_", 1:3)
+
+# --- Inférence Causale Multivariée (Régression Ajustée) ---
+
+# On crée un tableau final avec tout le monde :
+# Y (Metabo Latent) + A (SNP Latent) + W (Population)
+df_analysis <- data.frame(
+  Y_latent_scores,  # Les 3 colonnes métaboliques
+  A_treatment,      #  5 facteurs SNPs
+  W_conf            # PCs de population
+)
+
+# On teste l'effet de chaque Facteur SNP sur chaque Facteur Métabo
+
+
+resultats_finaux <- list()
+
+for(metabo_idx in 1:3) { # Pour chaque pattern métabolique
+  target_metabo <- paste0("Metabo_Pattern_", metabo_idx)
+  
+  # On écrit la formule : Metabo ~ SNP1 + SNP2 + SNP3 + PC1 + PC2 ...
+
+  formula_str <- paste0(target_metabo, " ~ ", 
+                        paste(colnames(A_treatment), collapse = " + "), " + ",
+                        paste(colnames(W_conf), collapse = " + "))
+  
+  fit <- lm(as.formula(formula_str), data = df_analysis)
+  
+  # On stocke le résumé
+  resultats_finaux[[target_metabo]] <- summary(fit)
+}
+
+# ---  Affichage des résultats ---
+
+# Résultats pour le Pattern Métabolique 1
+cat("\n=== RÉSULTATS POUR LE PATTERN METABOLIQUE 1 ===\n")
+print(resultats_finaux[["Metabo_Pattern_1"]]$coefficients)
+
+
+```
+
+On en conclut donc que les variables latentes SNP_factor_1, SNP_Factor_2, SNP_Factor_3,SNP_Factor_4 ont un effet sur la variable latente Pattern métabolique 1.
+
+**Toutes choses étant égales par ailleurs une augmentation de 1 unité du SNP_Factor_1 entraine une diminution de 6578 unité du score du Metabo_Pattern_1** 
+```{r}
+cat("\n=== RÉSULTATS POUR LE PATTERN METABOLIQUE 2 ===\n")
+print(resultats_finaux[["Metabo_Pattern_2"]]$coefficients)
+```
+
+```{r}
+cat("\n=== RÉSULTATS POUR LE PATTERN METABOLIQUE 3 ===\n")
+print(resultats_finaux[["Metabo_Pattern_3"]]$coefficients)
+```
+

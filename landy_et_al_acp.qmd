@@ -1,0 +1,182 @@
+---
+title: "Application de landy et al"
+format: html
+editor: visual
+output:
+  prettydoc::html_pretty:
+    theme: hpstr
+    highlight: github
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    highlight: tango
+---
+
+```{r}
+library(NMF)
+library(causalLFO)
+library(MASS)
+library(FactoMineR)
+```
+
+L'idée de ce qmd est d'appliquer une pipeline similaire à ce qu'on à fait auparavant dans application_landy_et_al.qmd mais en remplacant la nmf par une acp.
+
+## Chargement et prétaitement des données
+
+```{r}
+load("geno_numeric.Rdata")
+load("data_metabo_rep1.Rdata")
+# On met les données de geno_numeric au format individus en lignes et variable en colonnes
+tgeno_numeric <- t(geno_numeric)
+
+```
+
+**Traitement des données manquantes**
+
+```{r}
+cat("dimension du jeu de données SNP original", dim(geno_numeric), "\n")
+snp_clean <- na.omit(geno_numeric)
+cat("dimension du jeu de données SNP après traitement des NA", dim(snp_clean), "\n")
+```
+
+```{r}
+cat("dimension du jeu de données métabo original", dim(data_metabo_rep1), "\n")
+metabo_clean <- na.omit(data_metabo_rep1)
+cat("dimension du jeu de données métabo après traitement des NA", dim(metabo_clean), "\n")
+```
+
+**Pour le reste du traitement on ne garde uniquement les individus qui sont présent dans les deux jeu de données**
+
+```{r}
+# Identifiants dans les données génomiques (242 individus)
+tsnp_clean <- t(snp_clean)
+id_geno <- rownames(tsnp_clean) 
+
+# Identifiants dans les données de microbiome (69 individus)
+id_metabo <- rownames(metabo_clean)
+
+
+# Liste des identifiants d'échantillons communs (ceux que vous garderez)
+id_commun <- intersect(id_geno, id_metabo)
+
+
+# On garde donc que les individus communs
+snp_aligned <- tsnp_clean[id_commun, ]
+metabo_aligned <- metabo_clean[id_commun, ]
+
+```
+
+```{r}
+X_snp_aligned <- as.matrix(snp_aligned)
+Y_metabo_aligned <- as.matrix(metabo_aligned)
+
+
+```
+
+
+
+
+
+
+
+## Apprendre les facteur latents
+
+
+```{r}
+res_acp_snp <- PCA(X_snp_filtered)
+
+
+fviz_eig(res_acp_snp, addlabels = TRUE, ylim = c(0, 50), 
+         main = "Scree Plot - Variance expliquée par les PCs des SNPs")
+k_pcs <- 3
+#
+A_treatment <- res_acp_snp$ind$coord[, 1:k_pcs]
+colnames(A_treatment) <- paste0("SNP_Factor_", 1:ncol(A_treatment))
+```
+
+## Inférence Causale
+
+
+
+```{r}
+# ---Trouver les facteurs Métaboliques Latents (Outcome) ---
+
+
+
+res_acp_metabo <- PCA(Y_metabo_aligned)
+
+fviz_eig(res_acp_metabo, addlabels = TRUE, ylim = c(0, 50), 
+         main = "Scree Plot - Variance expliquée par les PCs des SNPs")
+
+#On prend 4 composantes principales
+k_pcs_metabo <- 4
+
+Y_latent_scores <- res_acp_metabo$ind$coord[,1:k_pcs_metabo]
+colnames(Y_latent_scores) <- paste0("Metabo_Pattern_", 1:ncol(Y_latent_scores))
+
+# ---  Inférence Causale Multivariée (Régression Ajustée) ---
+
+# On crée un tableau final avec tout le monde :
+# Y (Metabo Latent) + A (SNP Latent) + W (Population)
+df_analysis <- data.frame(
+  Y_latent_scores,  # Les colonnes métaboliques
+  A_treatment      #  facteurs SNPs
+  
+)
+
+# On teste l'effet de chaque Facteur SNP sur chaque Facteur Métabo
+# en ajustant sur TOUTES les PCs (W)
+
+resultats_finaux <- list()
+
+for(metabo_idx in 1:ncol(Y_latent_scores)) { # Pour chaque pattern métabolique
+  target_metabo <- paste0("Metabo_Pattern_", metabo_idx)
+  
+  # On écrit la formule : Metabo ~ SNP1 + SNP2 + SNP3 + PC1 + PC2 ...
+  
+  formula_str <- paste0(target_metabo, " ~ ", 
+                        paste(colnames(A_treatment), collapse = " + ")
+                        )
+  
+  fit <- lm(as.formula(formula_str), data = df_analysis)
+
+  resultats_finaux[[target_metabo]] <- summary(fit)
+}
+
+# --- Affichage des résultats ---
+
+# Résultats pour le Pattern Métabolique 1
+cat("\n=== RÉSULTATS POUR LE PATTERN METABOLIQUE 1 ===\n")
+print(resultats_finaux[["Metabo_Pattern_1"]]$coefficients)
+
+
+```
+```{r}
+# Résultats pour le Pattern Métabolique 2
+cat("\n=== RÉSULTATS POUR LE PATTERN METABOLIQUE 2 ===\n")
+print(resultats_finaux[["Metabo_Pattern_2"]]$coefficients)
+
+```
+
+```{r}
+# Résultats pour le Pattern Métabolique 3
+cat("\n=== RÉSULTATS POUR LE PATTERN METABOLIQUE 3 ===\n")
+print(resultats_finaux[["Metabo_Pattern_3"]]$coefficients)
+
+```
+
+```{r}
+# Résultats pour le Pattern Métabolique 4
+cat("\n=== RÉSULTATS POUR LE PATTERN METABOLIQUE 4 ===\n")
+print(resultats_finaux[["Metabo_Pattern_4"]]$coefficients)
+
+```
+Pour la met_4 SNP_1 est significatif
+
+
+

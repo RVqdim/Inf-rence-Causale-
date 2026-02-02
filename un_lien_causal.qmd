@@ -2,12 +2,27 @@
 title: "un_lien_causal"
 format: html
 editor: visual
+output:
+  prettydoc::html_pretty:
+    theme: hpstr
+    highlight: github
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    highlight: tango
 ---
 
 ```{r}
 library(dplyr)
 library(tibble)
 library(car)
+library(ComplexHeatmap)
+library(circlize) 
 ```
 
 ## Idée / contexte
@@ -20,11 +35,8 @@ Le groupe de SNP : Bn.A09.p2733282, Bn.A03.p6484137, Bn.C2.p51343986 et Bn.C7.p3
 
 Le groupe de SNP : Bn.A04.p2542000, Bn.C3.p1524306, Bn.C3.p3111862, Bn.C3.p6640991, et Bn.C4.p35007222 Et le groupe de métabolites : G30 : Pent i, G31 : 3mPen, G32 : Hex i1, G34 : Hept i1
 
-## Premiere tentative
+## nettoyage des données
 
-Première tentative: essayer de trouver un lien entre entre le premier groupe de SNP et le premier groupe de métabolite
-
-On va utiliser le principe de la régression linéaire mais on va l'étendre pour pouvoir voir l'effet d'un groupe avec un autre groupe. Onn va utiliser le MLM (Modèle linéaire multivarié)
 
 ```{r}
 load("data_metabo_rep1.Rdata")
@@ -32,7 +44,7 @@ load("data_microbio_rep1.Rdata")
 load("geno_numeric.Rdata")
 ```
 
-### choix des groupes
+### bloc 1
 
 ```{r}
 snp_cols <- c("Bn.A09.p2733282", "Bn.A03.p6484137", "Bn.C2.p51343986", "Bn.C7.p38504198")
@@ -88,30 +100,7 @@ geno_metabo_clean <- geno_metabo_final %>%
   )
 ```
 
-### modèle
-
-```{r}
-
-
-formula_mlm <- as.formula(paste(
-    "cbind(G7, G8, G11, G12) ~ ", 
-    paste(snp_presents, collapse = " + ")
-))
-
-print( format(formula_mlm))
-
-mlm_model <- lm(formula_mlm, data = geno_metabo_clean)
-
-# 7. Résultats
-print("--- RÉSULTATS STATISTIQUES (Pillai) ---")
-print(Anova(mlm_model, multivariate=TRUE, test.statistic="Pillai"))
-```
-
-test de Pillai = le plus robuste
-
-On voit donc que chaque SNP entraine le groupe de métabolites comme prévu
-
-## 2 eme modele
+### bloc 2
 
 ```{r}
 snp_cols2 <- c("Bn.A04.p2542000", "Bn.C3.p1524306", "Bn.C3.p3111862", "Bn.C3.p6640991","Bn.C4.p35007222")
@@ -162,107 +151,179 @@ geno_metabo_clean2 <- geno_metabo_final2 %>%
   )
 ```
 
-```{r}
-formula_mlm2 <- as.formula(paste(
-    "cbind(G30, G31, G32, G34) ~ ", 
-    paste(snp_presents2, collapse = " + ")
-))
 
-print( format(formula_mlm2))
-
-mlm_model2 <- lm(formula_mlm2, data = geno_metabo_clean2)
-
-# 7. Résultats
-print("--- RÉSULTATS STATISTIQUES (Pillai) ---")
-print(Anova(mlm_model2, multivariate=TRUE, test.statistic="Pillai"))
-```
 
 ## Matrice variance-covariance
 
-pour le genome NE PAS LANCER BEAUCOUP TROP LONG A RUN
-
 ```{r}
-geno_mat <- as.matrix(geno_numeric)
-geno_cov <- cov(geno_mat)
+# Fonction de couleur pour les CORRÉLATIONS (-1 à 1)
+# Bleu = Anticorrélation, Blanc = Nul, Rouge = Corrélation forte
+col_corr <- colorRamp2(c(-1, 0, 1), c("blue", "white", "red"))
 
-heatmap(geno_cov)
+# Fonction pour afficher les valeurs dans les cases (optionnel, utile si peu de variables)
+cell_fun_label <- function(j, i, x, y, width, height, fill, mat) {
+    grid.text(sprintf("%.2f", mat[i, j]), x, y, gp = gpar(fontsize = 10))
+}
 ```
 
 pour les metabos
 
 ```{r}
-# Voir quelles colonnes ont une variance nulle
+# Nettoyage des données 
 metabo_clean <- na.omit(data_metabo_rep1)
 metabo_mat <- as.matrix(metabo_clean)
+
+# Calcul des variances
 variances <- apply(metabo_mat, 2, var, na.rm = TRUE)
 cols_zero_var <- names(variances[variances == 0 | is.na(variances)])
 
-cat("Colonnes à variance nulle ou NA:\n")
+cat("Colonnes à variance nulle ou NA retirées :\n")
 print(cols_zero_var)
 
-# Retirer ces colonnes
+# On ne garde que les colonnes valides
 metabo_mat_clean <- metabo_mat[, variances > 0 & !is.na(variances)]
-noms_courts <- sub("_.*", "", colnames(metabo_cor))
-# Calculer et visualiser
+
+# Matrice de corrélation
 metabo_cor <- cor(metabo_mat_clean, use = "pairwise.complete.obs")
-heatmap(metabo_cor, 
-        labRow = noms_courts, 
-        labCol = noms_courts)
-heatmap(cov(metabo_mat_clean))
+
+# Matrice de covariance
+metabo_cov <- cov(metabo_mat_clean)
+
+# Création des noms courts (après avoir nettoyé la matrice)
+noms_courts <- sub("_.*", "", colnames(metabo_mat_clean))
+
+Heatmap(metabo_cor, 
+        name = "Corrélation", 
+        col = col_corr,
+        column_title = "Matrice de Corrélation (Tous Métabolites)",
+        row_labels = noms_courts,
+        column_labels = noms_courts,
+        row_names_gp = gpar(fontsize = 8),
+        column_names_gp = gpar(fontsize = 8),
+        # Clustering (pour regrouper les métabolites qui se ressemblent)
+        cluster_rows = TRUE,
+        cluster_columns = TRUE
+)
+
+
+# On adapte l'échelle de couleur au maximum de covariance observée.
+max_cov <- max(abs(metabo_cov))
+col_cov <- colorRamp2(c(min(metabo_cov),mean(metabo_cov),max(metabo_cov)), c("blue", "white", "red"))
+
+Heatmap(metabo_cov, 
+        name = "Covariance",
+        col = col_cov,
+        column_title = "Matrice de Covariance (Tous Métabolites)",
+        
+        row_labels = noms_courts,
+        column_labels = noms_courts,
+        
+        row_names_gp = gpar(fontsize = 8),
+        column_names_gp = gpar(fontsize = 8)
+)
 ```
-
-
 
 Pour le premier groupe ou il y a causalité entre les SNP et les métabos
 
 ```{r}
-
+# --- Préparation des données Groupe 1 ---
 geno_ready_mat <- geno_ready %>% 
   select(where(is.numeric)) %>% 
-  na.omit() %>%
+  na.omit() %>% 
   as.matrix()
-cov(geno_ready_mat)
 
-heatmap(cov(geno_ready_mat), main = " var covar snp groupe 1")
-heatmap(cor(geno_ready_mat), main = "cor snp groupe 1")
-
+# Sélection et nettoyage des noms pour les métabolites
 metabo_ready_mat <- metabo_ready %>% 
-  select("G7_Progoitrin_(nmol_g-1_DW)", "G8_Epiprogoitrin_(nmol_g-1_DW)", "G11_Glucobrassicanapin_(nmol_g-1_DW)", "G12_Gluconapoleiferin_(nmol_g-1_DW)")  
-  
-lab <- substr(colnames(metabo_ready_mat), 1, 3)
+  select("G7_Progoitrin_(nmol_g-1_DW)", "G8_Epiprogoitrin_(nmol_g-1_DW)", 
+         "G11_Glucobrassicanapin_(nmol_g-1_DW)", "G12_Gluconapoleiferin_(nmol_g-1_DW)")  
 
-heatmap(cov(metabo_ready_mat), labRow = lab, labCol = lab,main = " var covar metabo groupe 1")
+# Raccourcir les noms (G7, G8...) pour l'affichage
+colnames(metabo_ready_mat) <- substr(colnames(metabo_ready_mat), 1, 3) 
+metabo_ready_mat <- as.matrix(metabo_ready_mat)
 
-heatmap(cor(metabo_ready_mat), labRow = lab, labCol = lab,main = " cor metabo groupe 1")
+# --- Heatmaps SNPs Groupe 1 ---
+# Covariance (L'échelle de couleur doit s'adapter aux données max/min)
+cov_snp1 <- cov(geno_ready_mat)
+Heatmap(cov_snp1, 
+        name = "Covariance", 
+        column_title = "Covariance SNPs (Groupe 1)",
+        cluster_rows = FALSE, cluster_columns = FALSE) # Pas de clustering sur les SNPs si l'ordre importe
+
+# Corrélation
+cor_snp1 <- cor(geno_ready_mat)
+Heatmap(cor_snp1, 
+        name = "Correlation", 
+        col = col_corr,
+        column_title = "Corrélation SNPs (Groupe 1)",
+        cell_fun = function(j, i, x, y, width, height, fill) {
+            grid.text(sprintf("%.2f", cor_snp1[i, j]), x, y, gp = gpar(fontsize = 8))
+        })
+
+# --- Heatmaps Métabolites Groupe 1 ---
+cov_met1 <- cov(metabo_ready_mat)
+Heatmap(cov_met1, 
+        name = "Covariance", 
+        column_title = "Covariance Métabolites (Groupe 1)")
+
+cor_met1 <- cor(metabo_ready_mat)
+Heatmap(cor_met1, 
+        name = "Correlation", 
+        col = col_corr, 
+        column_title = "Corrélation Métabolites (Groupe 1)",
+        cell_fun = function(j, i, x, y, width, height, fill) {
+            grid.text(sprintf("%.2f", cor_met1[i, j]), x, y, gp = gpar(fontsize = 8))
+        })
 
 ```
 
-*Interprétation* de la matrice de variance covariance du premier groupe de SNP causaux:
+
 
 ```{r}
-par(oma = c(6, 1, 1, 6),
-    cex = 1.2,
-    cex.main = 1.2,
-    cex.lab = 0.5)
 
+# --- Préparation des données Groupe 2 ---
 geno_ready_mat2 <- geno_ready2 %>% 
   select(where(is.numeric)) %>% 
-  na.omit() %>%
+  na.omit() %>% 
   as.matrix()
-cov(geno_ready_mat2)
-
-heatmap(cov(geno_ready_mat2), main = "var-covar snp groupe 2")
-heatmap(cor(geno_ready_mat2), main = "cor snp groupe 2")
-
 
 metabo_ready_mat2 <- metabo_ready %>% 
   select("G30_Pentyl-GLS_isomer_(nmol_g-1_DW)",
-    "G31_3-methylpentyl-GLS_(nmol_g-1_DW)",
-    "G32_Hexyl-GLS_isomer_I_(nmol_g-1_DW)",
-    "G34_Heptyl-GLS_isomer_I_(nmol_g-1_DW)")  
-lab_g2 <- substr(colnames(metabo_ready_mat2),1,3)  
+         "G31_3-methylpentyl-GLS_(nmol_g-1_DW)",
+         "G32_Hexyl-GLS_isomer_I_(nmol_g-1_DW)",
+         "G34_Heptyl-GLS_isomer_I_(nmol_g-1_DW)")  
 
-heatmap(cov(metabo_ready_mat2),labRow = lab_g2, labCol = lab_g2,main = "var-covar metabo groupe 2")
+colnames(metabo_ready_mat2) <- substr(colnames(metabo_ready_mat2), 1, 3)
+metabo_ready_mat2 <- as.matrix(metabo_ready_mat2)
 
-heatmap(cor(metabo_ready_mat2),labRow = lab_g2, labCol = lab_g2, main = "cor metabo groupe 2")
+# --- Heatmaps SNPs Groupe 2 ---
+Heatmap(cov(geno_ready_mat2), 
+        name = "Variance covariance", 
+        column_title = "Variance Covariance SNPs (Groupe 2)",
+        cell_fun = function(j, i, x, y, width, height, fill) {
+             grid.text(sprintf("%.2f", cor_snp2[i, j]), x, y, gp = gpar(fontsize = 8))
+        }
+        )
+
+
+cor_snp2 <- cor(geno_ready_mat2)
+Heatmap(cor_snp2, 
+        name = "Correlation", 
+        col = col_corr,
+        column_title = "Corrélation SNPs (Groupe 2)",
+        cell_fun = function(j, i, x, y, width, height, fill) {
+             grid.text(sprintf("%.2f", cor_snp2[i, j]), x, y, gp = gpar(fontsize = 8))
+        })
+
+# --- Heatmaps Métabolites Groupe 2 ---
+cor_met2 <- cor(metabo_ready_mat2)
+Heatmap(cor_met2, 
+        name = "Correlation", 
+        col = col_corr,
+        column_title = "Corrélation Métabolites (Groupe 2)",
+        cell_fun = function(j, i, x, y, width, height, fill) {
+             grid.text(sprintf("%.2f", cor_met2[i, j]), x, y, gp = gpar(fontsize = 8))
+        })
+Heatmap(cov(metabo_ready_mat2), name = "variance covariance metabo groupe 2")
 ```
+
+

@@ -1,0 +1,113 @@
+---
+title: "causal_assumptions"
+format: html
+editor: visual
+---
+
+The goal of this qmd is to check for causal assumptions
+
+```{r}
+library(ggplot2)
+library(dplyr)
+```
+
+## Positivity
+
+Ici on veut vérifier que chaque snp a des groupes de 0, 1 et 2 pour qu'on puisse respecter l'hypothèse de Positivité.
+
+```{r}
+load("geno_numeric.Rdata")
+G <- as.matrix(geno_numeric)
+
+# Fonction pour compter le nombre min d'individus par catégorie
+check_positivity <- function(snp_column) {
+  counts <- table(snp_column)
+  # Si on a moins de 3 groupes (ex: que des 0 et 1), c'est un cas spécial
+  if(length(counts) < 3) return(min(counts)) 
+  
+  # Sinon on retourne la taille du plus petit groupe
+  return(min(counts))
+}
+
+# Appliquer sur tous les SNPs
+min_counts <- apply(G, 2, check_positivity)
+
+# REGARDONS LA RÉALITÉ :
+# Combien de SNPs ont un groupe avec moins de 3 plantes ?
+table(min_counts < 3)
+
+# Visualiser le problème
+hist(min_counts, breaks = 50, 
+     main = "Taille du plus petit groupe génotypique par SNP",
+     xlab = "Nombre de plantes dans la catégorie la plus rare")
+abline(v = 5, col = "red", lty = 2) # Seuil critique
+```
+
+Ici on montre la fréquence du nombre de plante dans la catégorie la plus rare. C'est-à-dire que pour un SNP on regarde le nombre de 0, de 1 et de 2 et on choisit la catégorie avec le moins de plantes. On fait ça pour tout nos SNP
+
+```{r}
+# On calcule deux métriques pour chaque SNP :
+# - La taille du plus petit groupe (ce que vous aviez déjà)
+# - La MAF (Fréquence de l'allèle mineur)
+calc_metrics_corrected <- function(x) {
+  counts <- table(x)
+  
+  # Gestion des cas où il manque des groupes
+  # On force table() à considérer 0, 1 et 2 même s'ils sont absents pour éviter les erreurs
+  full_counts <- setNames(rep(0, 3), c("0", "1", "2"))
+  full_counts[names(counts)] <- counts
+  
+  n0 <- full_counts["0"]
+  n1 <- full_counts["1"]
+  n2 <- full_counts["2"]
+  n_total <- sum(full_counts)
+  
+  #  Taille du plus petit groupe observé (pour la Positivité)
+  # On ne regarde que les groupes qui existent (>0)
+  observed_counts <- full_counts[full_counts > 0]
+  min_group_count <- min(observed_counts)
+  
+  # calcul de la MAF:
+  # Nombre d'allèles variants / Nombre total d'allèles
+  n_alleles_variants <- (n1 * 1) + (n2 * 2)
+  total_alleles <- n_total * 2
+  
+  freq_allele <- n_alleles_variants / total_alleles
+  
+  # La MAF est toujours <= 0.5. Si on a calculé > 0.5, c'est que le "0" était en fait l'allèle mineur.
+  maf <- ifelse(freq_allele > 0.5, 1 - freq_allele, freq_allele)
+  
+  return(c(min_group_count, maf))
+}
+
+
+metrics <- apply(G, 2, calc_metrics_corrected) 
+df_plot <- data.frame(Min_Count = metrics[1,], MAF = metrics[2,])
+
+
+# Définition du seuil de sécurité
+SEUIL <- 3 # On fixe le seuil à 1%
+
+# graphique
+ggplot(df_plot, aes(x = MAF, y = Min_Count)) +
+  # hypothèse pas vérifié (Fond rouge)
+  geom_rect(aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = SEUIL),
+            fill = "#ffcccc", alpha = 0.5) +
+  # hypothèse vérifié (Fond vert)
+  geom_rect(aes(xmin = -Inf, xmax = Inf, ymin = SEUIL, ymax = Inf),
+            fill = "#ccffcc", alpha = 0.1) +
+  geom_point(alpha = 0.6, size = 2, color = "darkgrey") +
+  geom_hline(yintercept = SEUIL, color = "red", linetype = "dashed", size = 1) +
+  theme_bw() +
+  scale_y_log10() + # Échelle log car les écarts sont grands
+  labs(
+    title = "Diagnostic de Positivité : Qui doit-on exclure ?",
+    subtitle = paste("Tout ce qui est dans la zone ROUGE (<", SEUIL, "plantes) viole l'hypothèse"),
+    x = "Fréquence de l'Allèle Mineur (MAF)",
+    y = "Nombre de plantes dans le groupe le plus rare (Log Scale)"
+  ) +
+  annotate("text", x = 0.1, y = SEUIL - 2, label = "Violation de Positivité", color = "red", fontface="bold") +
+  annotate("text", x = 0.1, y = SEUIL + 10, label = "Hypothèse Validée", color = "darkgreen", fontface="bold")
+```
+
+
