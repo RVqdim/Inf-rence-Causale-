@@ -1,2 +1,3 @@
 # Inf-rence-Causale-
-Ici c'est que du clic bouton
+
+Voici le repository qui rassemble les travaux réalisés pendant le projet :
